@@ -413,6 +413,6 @@ defmodule Makeup.Lexers.CureLexer do
 
     tokens
     |> postprocess(opts)
-    |> match_groups(string)
+    |> match_groups()
   end
 end

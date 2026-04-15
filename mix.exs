@@ -2,7 +2,7 @@ defmodule MakeupCure.MixProject do
   use Mix.Project
 
   @app :makeup_cure
-  @version "0.1.0"
+  @version "0.1.1"
   @source_url "https://github.com/am-kantox/makeup_cure"
 
   def project do
