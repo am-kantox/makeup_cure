@@ -3,11 +3,6 @@ defmodule Makeup.Lexers.CureLexerTest do
 
   alias Makeup.Lexers.CureLexer
 
-  # Helper: lex and strip whitespace tokens for easier assertion
-  defp lex(string) do
-    CureLexer.lex(string)
-  end
-
   defp lex_no_ws(string) do
     string
     |> CureLexer.lex()
@@ -16,10 +11,6 @@ defmodule Makeup.Lexers.CureLexerTest do
 
   defp token_types(string) do
     string |> lex_no_ws() |> Enum.map(&elem(&1, 0))
-  end
-
-  defp token_values(string) do
-    string |> lex_no_ws() |> Enum.map(&elem(&1, 2))
   end
 
   # -- Comments -----------------------------------------------------------

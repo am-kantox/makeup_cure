@@ -10,7 +10,7 @@ Add `makeup_cure` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:makeup_cure, "~> 0.1.0"}
+    {:makeup_cure, "~> 0.1"}
   ]
 end
 ```
@@ -32,6 +32,4 @@ CureLexer.lex("fn add(a: Int, b: Int) -> Int = a + b")
 
 ## License
 
-MIT -- see [LICENSE](LICENSE) for details.
-
-BSD-2-Clause
+MIT—see [LICENSE](LICENSE) for details.
