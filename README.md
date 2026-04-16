@@ -1,7 +1,7 @@
 # MakeupCure
 
 A [Makeup](https://hex.pm/packages/makeup) lexer for the
-[Cure](https://github.com/Oeditus/cure) programming language.
+[Cure](https://cure-lang.org) programming language.
 
 ## Installation
 
