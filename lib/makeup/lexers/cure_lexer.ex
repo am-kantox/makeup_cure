@@ -3,8 +3,14 @@ defmodule Makeup.Lexers.CureLexer do
   A `Makeup` lexer for the [Cure](https://cure-lang.org) programming language.
 
   Cure is a dependently-typed language for the BEAM with first-class finite
-  state machines and SMT-backed verification.  Its syntax is indentation-
-  significant, ML-influenced, and includes FSM transition literals.
+  state machines, typed supervision trees, OTP applications, SMT-backed
+  verification, and propositional equality. Its syntax is indentation-
+  significant, ML-influenced, and includes FSM transition literals, the
+  Melquiades send operator, and Erlang-style bitstring segments.
+
+  The tokeniser tracks the surface features of the language as of
+  Cure v0.28.0. See the top of `cure/CHANGELOG.md` in the Cure
+  repository for the authoritative reference.
 
   ## Registering the lexer
 
@@ -30,17 +36,46 @@ defmodule Makeup.Lexers.CureLexer do
 
   any_char = utf8_char([]) |> token(:error)
 
-  # -- Comments ---------------------------------------------------------
+  # -- Comments and doc comments ---------------------------------------
+  #
+  # Cure distinguishes three comment flavours:
+  #
+  #   #         plain line comment
+  #   ##        single-line doc comment
+  #   ###...### fenced multi-line doc comment (Cure v0.17.0+)
+  #
+  # Doc comments carry semantic weight (they are harvested by `cure doc`
+  # and feed the website) and are highlighted as `:string_doc` to match
+  # the convention used by makeup_elixir for `@doc` strings.
 
-  line =
+  line_body =
     repeat(
       lookahead_not(ascii_char([?\n]))
       |> utf8_string([], 1)
     )
 
+  fenced_doc_body =
+    repeat(
+      lookahead_not(string("###"))
+      |> utf8_string([], 1)
+    )
+
+  fenced_doc_comment =
+    string("###")
+    |> concat(fenced_doc_body)
+    |> concat(string("###"))
+    |> token(:string_doc)
+
+  single_line_doc_comment =
+    string("##")
+    |> lookahead_not(string("#"))
+    |> concat(line_body)
+    |> token(:string_doc)
+
   inline_comment =
     string("#")
-    |> concat(line)
+    |> lookahead_not(string("#"))
+    |> concat(line_body)
     |> token(:comment_single)
 
   # -- Numbers ----------------------------------------------------------
@@ -156,12 +191,19 @@ defmodule Makeup.Lexers.CureLexer do
     |> token(:string_regex)
 
   # -- Identifiers & keywords -------------------------------------------
-
-  # We tokenize all identifiers uniformly as :name and reclassify in postprocess/2.
+  #
+  # We tokenize all identifiers uniformly as :name and reclassify in
+  # postprocess/2. An identifier may carry a single trailing `?`
+  # (predicate convention, holes) or `!` (effect annotations, FSM hard
+  # events) so `is_empty?`, `even?`, and `stop!` all lex as a single
+  # `:name` token. The suffix is included in the token value so the
+  # postprocessor can still spot keywords (`if`, `mod`, ...) without a
+  # false match against `if?` or `mod!`.
 
   identifier_name =
     ascii_string([?a..?z, ?_], 1)
     |> optional(ascii_string([?a..?z, ?A..?Z, ?0..?9, ?_], min: 1))
+    |> optional(ascii_string([??, ?!], 1))
 
   identifier =
     identifier_name
@@ -179,28 +221,56 @@ defmodule Makeup.Lexers.CureLexer do
 
   module = token(module_name, :name_class)
 
+  # -- Typed holes ------------------------------------------------------
+  #
+  # `??` is the anonymous hole (`?_1`, `?_2`, ... after parsing).
+  # `?name` is a named hole. Both show up in type-error reports and
+  # in `cure synth` output. We highlight them as a pseudo-builtin
+  # name so editors give them a distinct colour from ordinary
+  # identifiers.
+
+  hole_anon =
+    string("??")
+    |> token(:name_builtin_pseudo)
+
+  hole_named =
+    string("?")
+    |> concat(
+      ascii_string([?a..?z, ?A..?Z, ?_], 1)
+      |> optional(ascii_string([?a..?z, ?A..?Z, ?0..?9, ?_], min: 1))
+    )
+    |> token(:name_builtin_pseudo)
+
   # -- Attributes -------------------------------------------------------
 
   attribute =
     string("@")
-    |> concat(identifier_name)
+    |> concat(
+      ascii_string([?a..?z, ?A..?Z, ?_], 1)
+      |> optional(ascii_string([?a..?z, ?A..?Z, ?0..?9, ?_], min: 1))
+    )
     |> token(:name_attribute)
 
   # -- Operators --------------------------------------------------------
 
-  # FSM transition: --event--> is handled specially below.
+  # FSM transition: --event--> is handled specially below. The Melquiades
+  # operator (v0.25.0) has two surface forms: the ASCII `<-|` and the
+  # unicode envelope `✉` (U+2709). `<-` is the binary-comprehension
+  # generator arrow (v0.22.0) and `::` is the bitstring-segment specifier
+  # (v0.20.0).
 
-  # Multi-char operators (longest match first)
   operator_name =
     word_from_list(~W(
-      <> |> -> => ..= .. == != <= >=
-      ++ -- ** << >>
+      <-| <- <> |> -> => ..= .. == != <= >=
+      ++ -- ** :: += -= *= /=
     ))
 
   operator = token(operator_name, :operator)
 
+  melquiades_unicode = token("✉", :operator)
+
   single_char_operator =
-    word_from_list(~W(+ - * / = < > | ^ ! &), :operator)
+    word_from_list(~W(+ - * / % = < > | ^ ! &), :operator)
 
   # FSM transition open `--` followed by non-`>` (to distinguish from `-->`)
   fsm_transition_open =
@@ -247,10 +317,11 @@ defmodule Makeup.Lexers.CureLexer do
 
   root_element_combinator =
     choice(
-      # Matched delimiter pairs
       [
         whitespace,
-        # Comments (must come before operators since # starts comments)
+        # Comments - order matters: fenced ### before ## before plain #
+        fenced_doc_comment,
+        single_line_doc_comment,
         inline_comment,
         # Strings and interpolation
         double_quoted_string,
@@ -259,18 +330,24 @@ defmodule Makeup.Lexers.CureLexer do
         # Char literal
         escape_char_literal,
         normal_char_literal,
-        # Atoms (must come before : punctuation)
+        # Atoms (must come before : punctuation and :: operator)
         atom,
         # Attributes (@extern etc.)
         attribute,
+        # Typed holes (?? before ?name, both before any stray `?` lands
+        # in an identifier suffix)
+        hole_anon,
+        hole_named,
         # FSM transitions (must come before -- operator)
         fsm_transition_close,
         fsm_transition_open
       ] ++
         delimiter_pairs ++
         [
-          # Multi-char operators (longest first)
+          # Multi-char operators (longest-first is handled by word_from_list)
           operator,
+          # Melquiades unicode `✉`
+          melquiades_unicode,
           # Numbers (hex and bin must come before plain integer)
           number_bin,
           number_hex,
@@ -319,10 +396,14 @@ defmodule Makeup.Lexers.CureLexer do
   # Step 2: postprocess the list of tokens
   ###################################################################
 
-  @declaration_keywords ~w(mod fn type proto impl fsm let rec local use as extern)
-  @control_keywords ~w(if elif else then match when where for do in
-                        try catch finally throw return yield)
+  @declaration_keywords ~w(mod fn type proto impl fsm let rec local use as extern
+                           actor sup app proof)
+  @control_keywords ~w(if elif else then match when where for do in end
+                       try catch finally throw return yield
+                       assert_type rewrite with)
   @concurrency_keywords ~w(spawn send receive after)
+  @fsm_callback_keywords ~w(on_start on_stop on_transition on_enter on_exit
+                            on_failure on_timer on_message on_phase)
   @constant_keywords ~w(true false nil)
   @word_operators ~w(and or not)
 
@@ -338,6 +419,10 @@ defmodule Makeup.Lexers.CureLexer do
   end
 
   defp postprocess_helper([{:name, meta, value} | rest]) when value in @concurrency_keywords do
+    [{:keyword, meta, value} | postprocess_helper(rest)]
+  end
+
+  defp postprocess_helper([{:name, meta, value} | rest]) when value in @fsm_callback_keywords do
     [{:keyword, meta, value} | postprocess_helper(rest)]
   end
 

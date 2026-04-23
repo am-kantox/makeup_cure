@@ -25,6 +25,24 @@ defmodule Makeup.Lexers.CureLexerTest do
       text = IO.iodata_to_binary(List.wrap(value))
       assert text =~ "this is a comment"
     end
+
+    test "## single-line doc comment is :string_doc" do
+      assert [{:string_doc, _, _}] = lex_no_ws("## Attach to the next definition.")
+    end
+
+    test "### fenced multi-line doc comment is :string_doc" do
+      source = """
+      ###
+      Multi-line docs land here.
+      ###\
+      """
+
+      assert [{:string_doc, _, _}] = lex_no_ws(source)
+    end
+
+    test "single # followed immediately by non-# is still a plain comment" do
+      assert [{:comment_single, _, _}] = lex_no_ws("#no space")
+    end
   end
 
   # -- Keywords -----------------------------------------------------------
@@ -48,12 +66,44 @@ defmodule Makeup.Lexers.CureLexerTest do
                "expected #{kw} to be keyword_declaration"
       end
     end
+
+    test "actor, sup, app, proof are keyword_declarations (v0.19.0 / v0.25.0 / v0.26.0)" do
+      for kw <- ~w(actor sup app proof) do
+        assert [:keyword_declaration] = token_types(kw),
+               "expected #{kw} to be keyword_declaration"
+      end
+    end
   end
 
   describe "control keywords" do
     test "if, else, then, match etc." do
       for kw <-
             ~w(if elif else then match when where for do in try catch finally throw return yield) do
+        assert [:keyword] = token_types(kw), "expected #{kw} to be keyword"
+      end
+    end
+
+    test "end is a control keyword (v0.22.0)" do
+      assert [:keyword] = token_types("end")
+    end
+
+    test "assert_type is a control keyword (v0.19.0)" do
+      assert [:keyword] = token_types("assert_type")
+    end
+
+    test "rewrite is a control keyword (v0.17.0)" do
+      assert [:keyword] = token_types("rewrite")
+    end
+
+    test "with is a control keyword (actor container)" do
+      assert [:keyword] = token_types("with")
+    end
+  end
+
+  describe "FSM / actor / sup / app lifecycle callbacks" do
+    test "on_start, on_stop, on_transition, ... are keywords" do
+      for kw <-
+            ~w(on_start on_stop on_transition on_enter on_exit on_failure on_timer on_message on_phase) do
         assert [:keyword] = token_types(kw), "expected #{kw} to be keyword"
       end
     end
@@ -96,6 +146,38 @@ defmodule Makeup.Lexers.CureLexerTest do
 
     test "identifier with digits" do
       assert [:name] = token_types("x42")
+    end
+
+    test "predicate identifier with trailing ?" do
+      assert [:name] = token_types("even?")
+      assert [:name] = token_types("is_empty?")
+    end
+
+    test "bang identifier with trailing !" do
+      assert [:name] = token_types("stop!")
+      assert [:name] = token_types("emergency!")
+    end
+
+    test "predicate identifier followed by ( is a function name" do
+      assert [:name_function, :punctuation] = token_types("even?(")
+    end
+
+    test "trailing ? does not swallow keyword (even?) / if? stays a name" do
+      # `if?` and `mod!` should remain plain :name tokens because
+      # they are not keywords themselves.
+      assert [:name] = token_types("if?")
+      assert [:name] = token_types("mod!")
+    end
+  end
+
+  describe "typed holes" do
+    test "?? is an anonymous hole (v0.17.0)" do
+      assert [:name_builtin_pseudo] = token_types("??")
+    end
+
+    test "?name is a named hole" do
+      assert [:name_builtin_pseudo] = token_types("?body")
+      assert [:name_builtin_pseudo] = token_types("?goal1")
     end
   end
 
@@ -258,7 +340,29 @@ defmodule Makeup.Lexers.CureLexerTest do
     end
 
     test "single char operators" do
-      for op <- ~w(+ - * / = < > | ^) do
+      for op <- ~w(+ - * / % = < > | ^) do
+        assert [:operator] = token_types(op), "expected #{op} to be operator"
+      end
+    end
+
+    test "Melquiades ASCII operator <-| (v0.25.0)" do
+      assert [:operator] = token_types("<-|")
+    end
+
+    test "Melquiades unicode operator ✉ (v0.25.0)" do
+      assert [:operator] = token_types("✉")
+    end
+
+    test "bitstring segment specifier :: (v0.20.0)" do
+      assert [:operator] = token_types("::")
+    end
+
+    test "generator arrow <- (v0.22.0)" do
+      assert [:operator] = token_types("<-")
+    end
+
+    test "augmented assignment +=, -=, *=, /=" do
+      for op <- ~w(+= -= *= /=) do
         assert [:operator] = token_types(op), "expected #{op} to be operator"
       end
     end
@@ -357,6 +461,69 @@ defmodule Makeup.Lexers.CureLexerTest do
     end
   end
 
+  # -- Full expressions: v0.17.0+ surface ---------------------------------
+
+  describe "actor / sup / app / proof containers" do
+    test "actor declaration" do
+      source = "actor Counter with 0"
+      types = token_types(source)
+      assert :keyword_declaration in types
+      assert :name_class in types
+      assert :number_integer in types
+    end
+
+    test "sup supervisor declaration" do
+      source = "sup Forge.Root"
+      types = token_types(source)
+      assert [:keyword_declaration, :name_class] = types
+    end
+
+    test "app application declaration" do
+      source = "app CureForge"
+      types = token_types(source)
+      assert [:keyword_declaration, :name_class] = types
+    end
+
+    test "proof container" do
+      source = "proof ProofLaws"
+      types = token_types(source)
+      assert [:keyword_declaration, :name_class] = types
+    end
+
+    test "Melquiades send expression" do
+      source = "pid <-| :ping"
+      types = token_types(source)
+      assert :name in types
+      assert :operator in types
+      assert :string_symbol in types
+    end
+
+    test "assert_type expression" do
+      source = "assert_type 42 : Int"
+      types = token_types(source)
+      assert :keyword in types
+      assert :number_integer in types
+      assert :name_class in types
+    end
+  end
+
+  describe "bitstring segment specifiers" do
+    test "segment with ::size" do
+      source = "<<len::16, payload::binary-size(len)>>"
+      types = token_types(source)
+      assert :punctuation in types
+      assert :operator in types
+      assert :number_integer in types
+    end
+
+    test "binary comprehension generator with <-" do
+      source = "[b for <<b <- buf>>]"
+      types = token_types(source)
+      assert :keyword in types
+      assert :operator in types
+    end
+  end
+
   # -- Lexer invariant: unlex roundtrip -----------------------------------
 
   describe "roundtrip" do
@@ -375,6 +542,53 @@ defmodule Makeup.Lexers.CureLexerTest do
         fn factorial(n: Int) -> Int
           | 0 -> 1
           | n -> n * factorial(n - 1)
+      """
+
+      assert source ==
+               source
+               |> CureLexer.lex()
+               |> Makeup.Lexer.unlex()
+    end
+
+    test "actor with Melquiades send roundtrips" do
+      source = """
+      actor Counter with 0
+        on_message
+          (:inc, n) -> n + 1
+          (:get, n) ->
+            pid <-| %[:value, n]
+            n
+      """
+
+      assert source ==
+               source
+               |> CureLexer.lex()
+               |> Makeup.Lexer.unlex()
+    end
+
+    test "sup with children roundtrips" do
+      source = """
+      sup Forge.Root
+        strategy  = :one_for_one
+        intensity = 5
+        children
+          Metrics as metrics
+          Logger  as logger  (restart: :permanent, shutdown: 2000)
+      """
+
+      assert source ==
+               source
+               |> CureLexer.lex()
+               |> Makeup.Lexer.unlex()
+    end
+
+    test "fenced doc comment roundtrips" do
+      source = """
+      ###
+      Binary comprehension generators.
+      ###
+      fn bytes_of(buf: Bitstring) -> List(Int) =
+        [b for <<b <- buf>>]
       """
 
       assert source ==
