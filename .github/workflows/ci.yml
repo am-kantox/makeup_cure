@@ -60,6 +60,10 @@ jobs:
     name: Code Quality
     runs-on: ubuntu-latest
 
+    env:
+      ELIXIR_VERSION: '1.19'
+      OTP_VERSION: '28'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -67,8 +71,8 @@ jobs:
       - name: Set up Elixir
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: '1.19'
-          otp-version: '28'
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
 
       - name: Restore dependencies cache
         uses: actions/cache@v4
@@ -76,9 +80,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-quality-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-quality-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-quality-
+            ${{ runner.os }}-mix-quality-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -87,12 +91,20 @@ jobs:
         run: mix compile
 
       - name: Restore PLT cache
+        id: plt_cache
         uses: actions/cache@v4
         with:
           path: .dialyzer
-          key: ${{ runner.os }}-plt-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-plt-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-plt-
+            ${{ runner.os }}-plt-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-
+
+      - name: Build PLT (if cache miss)
+        if: steps.plt_cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf .dialyzer
+          mkdir -p .dialyzer
+          mix dialyzer --plt
 
       - name: Run Dialyzer
         run: mix dialyzer --format github
